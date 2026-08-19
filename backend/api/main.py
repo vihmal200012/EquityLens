@@ -8,6 +8,7 @@ input validation and rate limiting for the expensive AI endpoint live.
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections import defaultdict
 
@@ -21,6 +22,7 @@ from backend.financial_engine.ratios import YearFinancials, compute_ratio_series
 from backend.portfolio import analytics as portfolio_analytics
 from backend.providers.base import ProviderUnavailableError
 from backend.providers.live_provider import get_provider
+from backend.providers.mock_provider import MockProvider
 from backend.reports.generator import ReportInputs, build_report
 from backend.valuation.comparables import PeerFinancials, run_comparable_valuation
 from backend.valuation.dcf import (
@@ -42,6 +44,8 @@ app.add_middleware(
 )
 
 provider = get_provider()  # resolved once at startup: live if configured, else demo
+_fallback_provider = MockProvider()  # used per-request if a live call fails after startup
+logger = logging.getLogger("equitylens.api")
 
 
 # ---------------------------------------------------------------------------
@@ -67,18 +71,39 @@ def _check_rate_limit(client_id: str) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load_years(ticker: str, years: int = 5) -> list[YearFinancials]:
+def _with_live_fallback(ticker: str, live_call, fallback_call):
+    """Try `live_call()` first. If the configured provider is live and the
+    call raises ProviderUnavailableError (bad key, network error, rate
+    limit), retries via `fallback_call()` against demo data for this one
+    request -- logged, and reflected in the returned data_mode, never
+    silently relabeled as live. ValueError (e.g. an unknown ticker) is
+    never treated as an availability failure and always surfaces as a 404.
+    Returns (result, data_mode)."""
     try:
-        inc = sorted(provider.get_income_statements(ticker, years), key=lambda s: s.fiscal_year)
-        bal = {s.fiscal_year: s.data for s in provider.get_balance_sheets(ticker, years)}
-        cf = {s.fiscal_year: s.data for s in provider.get_cash_flow_statements(ticker, years)}
-    except (ValueError, ProviderUnavailableError) as exc:
+        return live_call(), provider.name
+    except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProviderUnavailableError as exc:
+        if provider.name != "live_api":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        logger.warning("Live provider unavailable for %s (%s); using demo data for this request.", ticker, exc)
+        try:
+            return fallback_call(), _fallback_provider.name
+        except ValueError as exc2:
+            raise HTTPException(status_code=404, detail=str(exc2)) from exc2
 
-    return [
-        YearFinancials(fiscal_year=s.fiscal_year, income=s.data, balance=bal.get(s.fiscal_year, {}), cash_flow=cf.get(s.fiscal_year, {}))
-        for s in inc
-    ]
+
+def _load_years(ticker: str, years: int = 5) -> tuple[list[YearFinancials], str]:
+    def load(p) -> list[YearFinancials]:
+        inc = sorted(p.get_income_statements(ticker, years), key=lambda s: s.fiscal_year)
+        bal = {s.fiscal_year: s.data for s in p.get_balance_sheets(ticker, years)}
+        cf = {s.fiscal_year: s.data for s in p.get_cash_flow_statements(ticker, years)}
+        return [
+            YearFinancials(fiscal_year=s.fiscal_year, income=s.data, balance=bal.get(s.fiscal_year, {}), cash_flow=cf.get(s.fiscal_year, {}))
+            for s in inc
+        ]
+
+    return _with_live_fallback(ticker, lambda: load(provider), lambda: load(_fallback_provider))
 
 
 def _net_debt_and_shares(latest: YearFinancials) -> tuple[float, float]:
@@ -95,11 +120,15 @@ def _net_debt_and_shares(latest: YearFinancials) -> tuple[float, float]:
 
 
 def _company_and_ratios(ticker: str, years: int = 5):
-    year_objs = _load_years(ticker, years)
+    year_objs, data_mode = _load_years(ticker, years)
+    # reuse whichever provider _load_years actually used, so the company
+    # profile in the same response is never live while the financials it's
+    # paired with silently came from the demo fallback (or vice versa)
+    active = provider if data_mode == provider.name else _fallback_provider
     ratios = compute_ratio_series(year_objs)
-    profile = provider.get_company_profile(ticker)
+    profile = active.get_company_profile(ticker)
     company = {"ticker": profile.ticker, "name": profile.name, "sector": profile.sector, "industry": profile.industry}
-    return year_objs, ratios, company
+    return year_objs, ratios, company, data_mode
 
 
 # ---------------------------------------------------------------------------
@@ -108,16 +137,25 @@ def _company_and_ratios(ticker: str, years: int = 5):
 
 @app.get("/api/companies")
 def list_companies():
-    return {"tickers": provider.list_supported_tickers(), "data_mode": provider.name}
+    try:
+        return {"tickers": provider.list_supported_tickers(), "data_mode": provider.name}
+    except NotImplementedError:
+        # LiveProvider deliberately doesn't enumerate every ticker (see its
+        # docstring) -- surface that plainly instead of a bare 500, and
+        # point callers at exact-ticker search, which does work.
+        return {
+            "tickers": [],
+            "data_mode": provider.name,
+            "note": "The live provider does not support listing all tickers. Search by exact ticker, e.g. GET /api/companies/AAPL.",
+        }
 
 
 @app.get("/api/companies/{ticker}")
 def get_company(ticker: str):
-    try:
-        profile = provider.get_company_profile(ticker)
-        quote = provider.get_market_quote(ticker)
-    except (ValueError, ProviderUnavailableError) as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    def load(p):
+        return p.get_company_profile(ticker), p.get_market_quote(ticker)
+
+    (profile, quote), _data_mode = _with_live_fallback(ticker, lambda: load(provider), lambda: load(_fallback_provider))
 
     return {
         "ticker": profile.ticker,
@@ -139,10 +177,10 @@ def get_company(ticker: str):
 
 @app.get("/api/companies/{ticker}/financials")
 def get_financials(ticker: str, years: int = 5):
-    year_objs = _load_years(ticker, years)
+    year_objs, data_mode = _load_years(ticker, years)
     return {
         "ticker": ticker.upper(),
-        "data_mode": provider.name,
+        "data_mode": data_mode,
         "years": [
             {"fiscal_year": y.fiscal_year, "income_statement": y.income, "balance_sheet": y.balance, "cash_flow": y.cash_flow}
             for y in year_objs
@@ -152,9 +190,9 @@ def get_financials(ticker: str, years: int = 5):
 
 @app.get("/api/companies/{ticker}/ratios")
 def get_ratios(ticker: str, years: int = 5):
-    year_objs = _load_years(ticker, years)
+    year_objs, data_mode = _load_years(ticker, years)
     ratios = compute_ratio_series(year_objs)
-    return {"ticker": ticker.upper(), "data_mode": provider.name, "ratios_by_year": ratios}
+    return {"ticker": ticker.upper(), "data_mode": data_mode, "ratios_by_year": ratios}
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +220,7 @@ class DCFRequest(BaseModel):
 
 @app.post("/api/companies/{ticker}/dcf")
 def run_dcf_valuation(ticker: str, req: DCFRequest):
-    year_objs = _load_years(ticker, 1)
+    year_objs, data_mode = _load_years(ticker, 1)
     latest = year_objs[-1]
     net_debt, shares = _net_debt_and_shares(latest)
 
@@ -206,7 +244,7 @@ def run_dcf_valuation(ticker: str, req: DCFRequest):
 
     return {
         "ticker": ticker.upper(),
-        "data_mode": provider.name,
+        "data_mode": data_mode,
         "implied_share_price": round(result.implied_share_price, 2),
         "enterprise_value": round(result.enterprise_value, 1),
         "equity_value": round(result.equity_value, 1),
@@ -220,7 +258,7 @@ def run_dcf_valuation(ticker: str, req: DCFRequest):
 # D. Scenario analysis
 @app.post("/api/companies/{ticker}/dcf/scenarios")
 def run_dcf_scenarios(ticker: str, req: DCFRequest):
-    year_objs = _load_years(ticker, 1)
+    year_objs, data_mode = _load_years(ticker, 1)
     latest = year_objs[-1]
     net_debt, shares = _net_debt_and_shares(latest)
 
@@ -247,13 +285,13 @@ def run_dcf_scenarios(ticker: str, req: DCFRequest):
         name: {"implied_share_price": round(r.implied_share_price, 2), "enterprise_value": round(r.enterprise_value, 1)}
         for name, r in results.items()
     }
-    return {"ticker": ticker.upper(), "data_mode": provider.name, "scenarios": scenario_output}
+    return {"ticker": ticker.upper(), "data_mode": data_mode, "scenarios": scenario_output}
 
 
 # E. Sensitivity table
 @app.post("/api/companies/{ticker}/dcf/sensitivity")
 def run_sensitivity(ticker: str, req: DCFRequest, wacc_min: float = 0.06, wacc_max: float = 0.14, growth_min: float = 0.0, growth_max: float = 0.04):
-    year_objs = _load_years(ticker, 1)
+    year_objs, data_mode = _load_years(ticker, 1)
     latest = year_objs[-1]
     net_debt, shares = _net_debt_and_shares(latest)
 
@@ -273,7 +311,7 @@ def run_sensitivity(ticker: str, req: DCFRequest, wacc_min: float = 0.06, wacc_m
     wacc_steps = [round(wacc_min + i * (wacc_max - wacc_min) / 6, 4) for i in range(7)]
     growth_steps = [round(growth_min + i * (growth_max - growth_min) / 4, 4) for i in range(5)]
     table = sensitivity_table(base, wacc_steps, growth_steps)
-    return {"ticker": ticker.upper(), "data_mode": provider.name, **table}
+    return {"ticker": ticker.upper(), "data_mode": data_mode, **table}
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +337,7 @@ class ComparablesRequest(BaseModel):
 
 @app.post("/api/companies/{ticker}/comparables")
 def run_comparables(ticker: str, req: ComparablesRequest):
-    year_objs = _load_years(ticker, 1)
+    year_objs, data_mode = _load_years(ticker, 1)
     latest = year_objs[-1]
     net_debt, shares = _net_debt_and_shares(latest)
 
@@ -318,7 +356,7 @@ def run_comparables(ticker: str, req: ComparablesRequest):
 
     return {
         "ticker": ticker.upper(),
-        "data_mode": provider.name,
+        "data_mode": data_mode,
         "median_pe": result.median_pe,
         "mean_pe": result.mean_pe,
         "median_ev_ebitda": result.median_ev_ebitda,
@@ -407,13 +445,13 @@ def ask_ai(ticker: str, req: AIQuestionRequest, request: Request):
     client_id = request.client.host if request.client else "unknown"
     _check_rate_limit(client_id)
 
-    year_objs, ratios, company = _company_and_ratios(ticker, 5)
+    year_objs, ratios, company, data_mode = _company_and_ratios(ticker, 5)
 
     ctx = AIContext(
         company=company,
         financials={y.fiscal_year: {"income_statement": y.income, "balance_sheet": y.balance, "cash_flow": y.cash_flow} for y in year_objs},
         ratios=ratios,
-        data_mode=provider.name,
+        data_mode=data_mode,
     )
 
     assistant = ResearchAssistant()
@@ -424,7 +462,7 @@ def ask_ai(ticker: str, req: AIQuestionRequest, request: Request):
     except AIUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    return {"ticker": ticker.upper(), "question": req.question, "answer": answer, "data_mode": provider.name}
+    return {"ticker": ticker.upper(), "question": req.question, "answer": answer, "data_mode": data_mode}
 
 
 # ---------------------------------------------------------------------------
@@ -436,13 +474,13 @@ def generate_report(ticker: str):
     """Quick report from financials/ratios alone — no valuation section
     filled in. Use POST /report to include DCF/comparables/scenario/AI
     results the caller already computed (see that handler's docstring)."""
-    year_objs, ratios, company = _company_and_ratios(ticker, 5)
+    year_objs, ratios, company, data_mode = _company_and_ratios(ticker, 5)
 
     inputs = ReportInputs(
         company=company,
         financials_by_year={y.fiscal_year: {"income": y.income, "balance": y.balance, "cash_flow": y.cash_flow} for y in year_objs},
         ratios_by_year=ratios,
-        data_mode=provider.name,
+        data_mode=data_mode,
     )
     return build_report(inputs)
 
@@ -462,7 +500,7 @@ class ReportRequest(BaseModel):
 
 @app.post("/api/companies/{ticker}/report")
 def generate_full_report(ticker: str, req: ReportRequest):
-    year_objs, ratios, company = _company_and_ratios(ticker, 5)
+    year_objs, ratios, company, data_mode = _company_and_ratios(ticker, 5)
 
     inputs = ReportInputs(
         company=company,
@@ -472,7 +510,7 @@ def generate_full_report(ticker: str, req: ReportRequest):
         dcf_assumptions=req.dcf_assumptions,
         comparables=req.comparables,
         scenarios=req.scenarios,
-        data_mode=provider.name,
+        data_mode=data_mode,
         ai_narrative=req.ai_narrative,
     )
     return build_report(inputs)

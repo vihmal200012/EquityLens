@@ -37,12 +37,31 @@ Vantage, IEX, Polygon, etc.), write a new class implementing
 `FinancialDataProvider` (see `backend/providers/base.py`) with that
 provider's actual endpoint shapes — the rest of the app doesn't change.
 
-If `FINANCIAL_API_KEY` is set but the live request fails (bad key, network
-error, rate limit), `get_provider()` logs a warning and falls back to
-`MockProvider` rather than crashing or returning a partial/wrong result —
-but this fallback is logged, not silent, and the API response's
-`data_mode` field will say `"demo"` so the client can display the DEMO MODE
-banner even though a live key was configured.
+Vendor payloads come back in that API's own field names and sign
+conventions (e.g. `totalDebt`, `operatingIncome`, capex reported as a
+negative outflow). `LiveProvider` maps every statement it returns onto the
+same internal snake_case schema `MockProvider` produces (`total_debt`,
+`ebit`, capex as a positive magnitude, etc.) before handing it to
+`ratios.py` / `dcf.py` — see the field-map tables at the top of
+`backend/providers/live_provider.py`. `shares_outstanding` isn't present on
+FMP's balance-sheet endpoint at all; `LiveProvider` fetches it from the
+profile endpoint once per ticker and attaches it to each balance-sheet
+year.
+
+Two layers of fallback exist, and they mean different things:
+- **At startup**, `get_provider()` uses `LiveProvider` only if
+  `FINANCIAL_API_KEY` is set *and* constructing it succeeds (i.e. a key
+  string is present) — otherwise it falls back to `MockProvider` for the
+  whole process, logged.
+- **Per request**, if the resolved provider is live and an individual call
+  fails later (bad key, network error, rate limit), the API layer
+  (`backend/api/main.py`'s `_with_live_fallback`) retries that one request
+  against demo data rather than crashing or returning a partial/wrong
+  result. This fallback is logged, never silent, and the response's
+  `data_mode` field says `"demo"` for that request even though a live key
+  is configured — so the client always knows which data it actually got,
+  never a live key silently paired with stale/wrong demo numbers labeled
+  as live.
 
 ## What is never done
 

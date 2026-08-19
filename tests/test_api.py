@@ -2,10 +2,41 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+import backend.api.main as main_module
 from backend.api.main import _net_debt_and_shares, app
 from backend.financial_engine.ratios import YearFinancials
+from backend.providers.base import ProviderUnavailableError
 
 client = TestClient(app)
+
+
+class _FailingLiveProvider:
+    """Stands in for a configured LiveProvider whose requests fail at
+    call-time (bad key, network error, rate limit) -- as opposed to
+    failing at construction time, which get_provider() already handles."""
+
+    name = "live_api"
+
+    def __init__(self, error: Exception):
+        self._error = error
+
+    def get_income_statements(self, ticker, years):
+        raise self._error
+
+    def get_balance_sheets(self, ticker, years):
+        raise self._error
+
+    def get_cash_flow_statements(self, ticker, years):
+        raise self._error
+
+    def get_company_profile(self, ticker):
+        raise self._error
+
+    def get_market_quote(self, ticker):
+        raise self._error
+
+    def list_supported_tickers(self):
+        raise self._error
 
 DCF_PAYLOAD = dict(
     revenue_growth_rates=[0.08, 0.07, 0.06, 0.05, 0.04],
@@ -181,6 +212,43 @@ def test_post_report_with_no_body_matches_get_report_placeholders():
     r = client.post("/api/companies/AAPL/report", json={})
     assert r.status_code == 200
     assert r.json()["sections"]["dcf_valuation"] == "No DCF has been run for this company yet."
+
+
+def test_financials_falls_back_to_demo_when_live_provider_fails(monkeypatch):
+    """Confirms the per-request fallback promised in docs/DATA_SOURCES.md:
+    if a live provider is configured but an individual request fails after
+    startup, the endpoint should still succeed by using demo data for that
+    request -- labeled as such -- rather than 404ing or crashing."""
+    monkeypatch.setattr(main_module, "provider", _FailingLiveProvider(ProviderUnavailableError("simulated outage")))
+    r = client.get("/api/companies/AAPL/financials")
+    assert r.status_code == 200
+    assert r.json()["data_mode"] == "demo"
+    assert len(r.json()["years"]) == 5
+
+
+def test_get_company_falls_back_to_demo_when_live_provider_fails(monkeypatch):
+    monkeypatch.setattr(main_module, "provider", _FailingLiveProvider(ProviderUnavailableError("simulated outage")))
+    r = client.get("/api/companies/AAPL")
+    assert r.status_code == 200
+    assert r.json()["data_mode"] == "demo"
+
+
+def test_unknown_ticker_still_404s_even_when_provider_is_live(monkeypatch):
+    """A bad ticker is a ValueError, not a provider-availability problem --
+    it must never trigger a silent fallback to demo data for a different
+    (mismatched) ticker."""
+    monkeypatch.setattr(main_module, "provider", _FailingLiveProvider(ValueError("'ZZZZ' not found")))
+    r = client.get("/api/companies/ZZZZ/financials")
+    assert r.status_code == 404
+
+
+def test_list_companies_handles_live_provider_without_enumeration(monkeypatch):
+    """LiveProvider.list_supported_tickers() always raises NotImplementedError
+    by design; the endpoint must not 500 because of it."""
+    monkeypatch.setattr(main_module, "provider", _FailingLiveProvider(NotImplementedError("nope")))
+    r = client.get("/api/companies")
+    assert r.status_code == 200
+    assert r.json()["tickers"] == []
 
 
 def test_end_to_end_aapl_flow():

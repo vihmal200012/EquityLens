@@ -31,6 +31,7 @@ class StatementPeriod:
     fiscal_year: int
     period: str  # "FY"
     data: dict = field(default_factory=dict)
+    source: str = "unknown"  # "demo" | "live_api" — which provider produced this record
 
 
 @dataclass

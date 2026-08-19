@@ -33,12 +33,18 @@ FinancialDataProvider (abstract base, providers/base.py)
 ```
 
 `get_provider()` in `providers/live_provider.py` resolves which one to use
-at app startup: `LiveProvider` if `FINANCIAL_API_KEY` is set and reachable,
-`MockProvider` otherwise — logged either way, never silent. Every consumer
-of provider data (the ratio engine, the DCF endpoint, the AI context
-builder) only ever sees the `FinancialDataProvider` interface, so adding a
-second real provider (e.g. Alpha Vantage alongside FMP) means writing one
-new adapter class and nothing else changes.
+at app startup: `LiveProvider` if `FINANCIAL_API_KEY` is set, `MockProvider`
+otherwise — logged either way, never silent. This startup check only
+confirms a key string is configured, not that the vendor API is actually
+reachable; if a live request fails later (bad key, network error, rate
+limit), `backend/api/main.py`'s `_with_live_fallback` retries that one
+request against demo data and labels the response `data_mode: "demo"`
+accordingly (see `docs/DATA_SOURCES.md`) rather than crashing or silently
+presenting stale/demo numbers as live. Every consumer of provider data (the
+ratio engine, the DCF endpoint, the AI context builder) only ever sees the
+`FinancialDataProvider` interface, so adding a second real provider (e.g.
+Alpha Vantage alongside FMP) means writing one new adapter class and
+nothing else changes.
 
 ## Database schema
 

@@ -216,19 +216,19 @@ class MockProvider(FinancialDataProvider):
 
     def get_income_statements(self, ticker: str, years: int = 5) -> list[StatementPeriod]:
         return [
-            StatementPeriod(fiscal_year=row["fiscal_year"], period="FY", data=row["income_statement"])
+            StatementPeriod(fiscal_year=row["fiscal_year"], period="FY", data=row["income_statement"], source="demo")
             for row in self._years(ticker, years)
         ]
 
     def get_balance_sheets(self, ticker: str, years: int = 5) -> list[StatementPeriod]:
         return [
-            StatementPeriod(fiscal_year=row["fiscal_year"], period="FY", data=row["balance_sheet"])
+            StatementPeriod(fiscal_year=row["fiscal_year"], period="FY", data=row["balance_sheet"], source="demo")
             for row in self._years(ticker, years)
         ]
 
     def get_cash_flow_statements(self, ticker: str, years: int = 5) -> list[StatementPeriod]:
         return [
-            StatementPeriod(fiscal_year=row["fiscal_year"], period="FY", data=row["cash_flow"])
+            StatementPeriod(fiscal_year=row["fiscal_year"], period="FY", data=row["cash_flow"], source="demo")
             for row in self._years(ticker, years)
         ]
 
