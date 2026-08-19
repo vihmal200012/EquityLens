@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from backend.ai.assistant import AIUnavailableError, ResearchAssistant
 from backend.ai.context import AIContext
+from backend.database.models import Company, DataSource, ResearchReport
+from backend.database.session import get_session, init_db
 from backend.financial_engine.ratios import YearFinancials, compute_ratio_series
 from backend.portfolio import analytics as portfolio_analytics
 from backend.providers.base import ProviderUnavailableError
@@ -35,6 +37,7 @@ from backend.valuation.dcf import (
 )
 
 app = FastAPI(title="EquityLens API", version="0.1.0")
+init_db()  # idempotent (CREATE TABLE IF NOT EXISTS); needed for research_reports persistence below
 
 app.add_middleware(
     CORSMiddleware,
@@ -129,6 +132,60 @@ def _company_and_ratios(ticker: str, years: int = 5):
     profile = active.get_company_profile(ticker)
     company = {"ticker": profile.ticker, "name": profile.name, "sector": profile.sector, "industry": profile.industry}
     return year_objs, ratios, company, data_mode
+
+
+def _get_or_create_company_row(session, company: dict, data_mode: str) -> Company:
+    """Research report/AI-answer persistence needs a companies.id foreign
+    key, but the API itself never writes to the companies table on the
+    read path (it reads live from the provider each request) -- so a row
+    may not exist yet for a ticker the caller hasn't seeded. Create one
+    lazily from the same profile data already fetched for this request,
+    mirroring database/seed.py's fields."""
+    ticker = company["ticker"].upper()
+    existing = session.query(Company).filter_by(ticker=ticker).one_or_none()
+    if existing:
+        return existing
+    row = Company(
+        ticker=ticker,
+        name=company.get("name") or ticker,
+        sector=company.get("sector"),
+        industry=company.get("industry"),
+        source=DataSource.LIVE_API if data_mode == "live_api" else DataSource.DEMO,
+    )
+    session.add(row)
+    session.flush()  # assigns row.id without waiting for the outer commit
+    return row
+
+
+def _persist_report(
+    company: dict,
+    data_mode: str,
+    title: str,
+    sections: dict,
+    *,
+    ai_assisted: bool = False,
+    generated_by: str = "equitylens-report-engine",
+) -> int | None:
+    """Best-effort save to research_reports. A database hiccup must never
+    turn an already-computed, successful report/answer into an error for
+    the caller -- log and return None (caller surfaces id: null) instead
+    of raising."""
+    try:
+        with get_session() as session:
+            company_row = _get_or_create_company_row(session, company, data_mode)
+            row = ResearchReport(
+                company_id=company_row.id,
+                title=title,
+                sections=sections,
+                ai_assisted=ai_assisted,
+                generated_by=generated_by,
+            )
+            session.add(row)
+            session.flush()
+            return row.id
+    except Exception:
+        logger.exception("Failed to persist research report for %s", company.get("ticker"))
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +530,22 @@ def ask_ai(ticker: str, req: AIQuestionRequest, request: Request):
     except AIUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    return {"ticker": ticker.upper(), "question": req.question, "answer": answer, "data_mode": data_mode}
+    saved_id = _persist_report(
+        company,
+        data_mode,
+        title=f"AI Q&A: {clean_question[:120]}",
+        sections={"question": clean_question, "answer": answer},
+        ai_assisted=True,
+        generated_by="ai-research-assistant",
+    )
+
+    return {
+        "ticker": ticker.upper(),
+        "question": req.question,
+        "answer": answer,
+        "data_mode": data_mode,
+        "id": saved_id,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +556,10 @@ def ask_ai(ticker: str, req: AIQuestionRequest, request: Request):
 def generate_report(ticker: str):
     """Quick report from financials/ratios alone — no valuation section
     filled in. Use POST /report to include DCF/comparables/scenario/AI
-    results the caller already computed (see that handler's docstring)."""
+    results the caller already computed (see that handler's docstring).
+    Not persisted: this fires automatically on every Report-tab page load,
+    so saving it would flood research_reports with duplicates the user
+    never asked to keep -- only the explicit POST (regenerate) is saved."""
     year_objs, ratios, company, data_mode = _company_and_ratios(ticker, 5)
 
     inputs = ReportInputs(
@@ -493,7 +568,9 @@ def generate_report(ticker: str):
         ratios_by_year=ratios,
         data_mode=data_mode,
     )
-    return build_report(inputs)
+    report = build_report(inputs)
+    report["id"] = None
+    return report
 
 
 class ReportRequest(BaseModel):
@@ -524,7 +601,69 @@ def generate_full_report(ticker: str, req: ReportRequest):
         data_mode=data_mode,
         ai_narrative=req.ai_narrative,
     )
-    return build_report(inputs)
+    report = build_report(inputs)
+    report["id"] = _persist_report(
+        company,
+        data_mode,
+        title=report["title"],
+        sections=report["sections"],
+        ai_assisted=bool(req.ai_narrative),
+    )
+    return report
+
+
+@app.get("/api/companies/{ticker}/reports")
+def list_saved_reports(ticker: str, limit: int = 20):
+    """Previously generated (POST /report) reports and AI Q&A answers for
+    this ticker, most recent first -- see research_reports in the schema
+    (docs/ARCHITECTURE.md). Unknown/never-saved-to ticker returns an empty
+    list rather than 404, since "no saved reports yet" isn't an error."""
+    with get_session() as session:
+        company_row = session.query(Company).filter_by(ticker=ticker.upper()).one_or_none()
+        rows = (
+            session.query(ResearchReport)
+            .filter_by(company_id=company_row.id)
+            .order_by(ResearchReport.created_at.desc())
+            .limit(max(1, min(limit, 100)))
+            .all()
+            if company_row
+            else []
+        )
+        return {
+            "ticker": ticker.upper(),
+            "reports": [
+                {
+                    "id": r.id,
+                    "title": r.title,
+                    "generated_by": r.generated_by,
+                    "ai_assisted": r.ai_assisted,
+                    "created_at": r.created_at.isoformat(),
+                }
+                for r in rows
+            ],
+        }
+
+
+@app.get("/api/companies/{ticker}/reports/{report_id}")
+def get_saved_report(ticker: str, report_id: int):
+    with get_session() as session:
+        company_row = session.query(Company).filter_by(ticker=ticker.upper()).one_or_none()
+        row = (
+            session.query(ResearchReport).filter_by(id=report_id, company_id=company_row.id).one_or_none()
+            if company_row
+            else None
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail=f"No saved report {report_id} for {ticker.upper()}.")
+        return {
+            "id": row.id,
+            "ticker": ticker.upper(),
+            "title": row.title,
+            "sections": row.sections,
+            "generated_by": row.generated_by,
+            "ai_assisted": row.ai_assisted,
+            "created_at": row.created_at.isoformat(),
+        }
 
 
 @app.get("/api/health")

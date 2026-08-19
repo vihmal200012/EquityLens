@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, SavedReportSummary } from "@/lib/api";
 import { Card } from "@/components/Card";
 import { ErrorBanner } from "@/components/StatusStates";
 import DataModeBadge from "@/components/DataModeBadge";
@@ -22,6 +22,19 @@ export default function AIAssistantPage() {
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(false);
+  const [history, setHistory] = useState<SavedReportSummary[]>([]);
+
+  function refreshHistory() {
+    api
+      .listSavedReports(ticker)
+      .then((res) => setHistory(res.reports.filter((r) => r.generated_by === "ai-research-assistant")))
+      .catch(() => setHistory([])); // non-critical: quietly hide the section rather than erroring the page
+  }
+
+  useEffect(() => {
+    refreshHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ticker]);
 
   async function ask(e: FormEvent) {
     e.preventDefault();
@@ -34,11 +47,21 @@ export default function AIAssistantPage() {
       const res = await api.askAI(ticker, q);
       setTurns((t) => t.map((turn, i) => (i === t.length - 1 ? { ...turn, answer: res.answer, dataMode: res.data_mode } : turn)));
       setCached(ticker, "ai_last_answer", res);
+      refreshHistory(); // the question was just saved to research_reports -- pick it up
     } catch (e) {
       const message = (e as ApiError).message;
       setTurns((t) => t.map((turn, i) => (i === t.length - 1 ? { ...turn, error: message } : turn)));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function viewPastQuestion(id: number) {
+    try {
+      const detail = await api.getSavedReport(ticker, id);
+      setTurns((t) => [...t, { question: detail.sections.question, answer: detail.sections.answer }]);
+    } catch {
+      // non-critical: the "View" button just won't do anything if this fails
     }
   }
 
@@ -51,6 +74,29 @@ export default function AIAssistantPage() {
           the backend, this will return a 503.
         </p>
       </Card>
+
+      {history.length > 0 ? (
+        <Card>
+          <h3 className="mb-3 text-sm font-semibold">Previous Questions</h3>
+          <ul className="divide-y divide-black/5 dark:divide-white/5">
+            {history.map((h) => (
+              <li key={h.id} className="flex items-center justify-between gap-3 py-2">
+                <div>
+                  <p className="text-sm">{h.title.replace(/^AI Q&A: /, "")}</p>
+                  <p className="text-xs text-black/50 dark:text-white/50">{new Date(h.created_at).toLocaleString()}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => viewPastQuestion(h.id)}
+                  className="shrink-0 rounded-md border border-black/15 px-3 py-1 text-xs font-medium hover:bg-black/[0.03] dark:border-white/15 dark:hover:bg-white/[0.05]"
+                >
+                  View
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
 
       <div className="space-y-4">
         {turns.map((turn, i) => (

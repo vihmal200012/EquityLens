@@ -349,3 +349,108 @@ def test_end_to_end_aapl_flow():
     assert full_report.status_code == 200
     price_str = f"{dcf.json()['implied_share_price']:.2f}"
     assert price_str in full_report.json()["sections"]["dcf_valuation"]
+
+
+# ---------------------------------------------------------------------------
+# J. Research report persistence (research_reports table)
+# ---------------------------------------------------------------------------
+
+
+def test_get_report_is_never_persisted():
+    """The quick GET /report fires automatically on every Report-tab page
+    load; persisting it would flood research_reports with duplicates the
+    user never asked to save."""
+    r = client.get("/api/companies/AAPL/report")
+    assert r.status_code == 200
+    assert r.json()["id"] is None
+
+
+def test_post_report_persists_and_is_listed_and_retrievable():
+    r = client.post("/api/companies/MSFT/report", json={})
+    assert r.status_code == 200
+    report_id = r.json()["id"]
+    assert report_id is not None
+
+    listing = client.get("/api/companies/MSFT/reports")
+    assert listing.status_code == 200
+    ids = [row["id"] for row in listing.json()["reports"]]
+    assert report_id in ids
+    saved_row = next(row for row in listing.json()["reports"] if row["id"] == report_id)
+    assert saved_row["generated_by"] == "equitylens-report-engine"
+    assert saved_row["ai_assisted"] is False
+
+    fetched = client.get(f"/api/companies/MSFT/reports/{report_id}")
+    assert fetched.status_code == 200
+    body = fetched.json()
+    assert body["id"] == report_id
+    assert body["title"] == r.json()["title"]
+    assert body["sections"] == r.json()["sections"]
+
+
+def test_saved_report_scoped_to_its_own_ticker():
+    """A report saved under one ticker must not be fetchable through a
+    different ticker's URL, even with the correct id."""
+    msft_report = client.post("/api/companies/MSFT/report", json={})
+    report_id = msft_report.json()["id"]
+    assert client.get(f"/api/companies/NVDA/reports/{report_id}").status_code == 404
+
+
+def test_get_saved_report_404_for_unknown_id():
+    r = client.get("/api/companies/AAPL/reports/999999999")
+    assert r.status_code == 404
+
+
+def test_list_saved_reports_empty_for_ticker_with_no_saved_reports():
+    r = client.get("/api/companies/EQUITYLENS_NEVER_SAVED_TICKER/reports")
+    assert r.status_code == 200
+    assert r.json() == {"ticker": "EQUITYLENS_NEVER_SAVED_TICKER", "reports": []}
+
+
+def test_ai_ask_persists_qa_when_answered(monkeypatch):
+    monkeypatch.setenv("AI_API_KEY", "test-key-not-real")
+    monkeypatch.setattr(
+        main_module.ResearchAssistant, "ask", lambda self, ctx, question: f"Canned answer to: {question}"
+    )
+
+    r = client.post("/api/companies/AAPL/ai/ask", json={"question": "What drove FY2025 margin expansion?"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["answer"] == "Canned answer to: What drove FY2025 margin expansion?"
+    assert body["id"] is not None
+
+    listing = client.get("/api/companies/AAPL/reports").json()["reports"]
+    saved = next(row for row in listing if row["id"] == body["id"])
+    assert saved["generated_by"] == "ai-research-assistant"
+    assert saved["ai_assisted"] is True
+
+    fetched = client.get(f"/api/companies/AAPL/reports/{body['id']}").json()
+    assert fetched["sections"]["question"] == "What drove FY2025 margin expansion?"
+    assert fetched["sections"]["answer"] == body["answer"]
+
+
+def test_ai_ask_503_without_key_never_persists(monkeypatch):
+    monkeypatch.delenv("AI_API_KEY", raising=False)
+    before = len(client.get("/api/companies/AAPL/reports").json()["reports"])
+    r = client.post("/api/companies/AAPL/ai/ask", json={"question": "Anything?"})
+    assert r.status_code == 503
+    after = len(client.get("/api/companies/AAPL/reports").json()["reports"])
+    assert after == before
+
+
+def test_report_persistence_failure_does_not_break_the_response(monkeypatch):
+    """A database hiccup while saving must never turn an already-computed,
+    successful report into an error for the caller -- it should just come
+    back with id: null."""
+
+    class _BrokenSession:
+        def __enter__(self):
+            raise RuntimeError("simulated database outage")
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(main_module, "get_session", lambda: _BrokenSession())
+    r = client.post("/api/companies/NVDA/report", json={})
+    assert r.status_code == 200
+    assert r.json()["id"] is None
+    assert r.json()["title"]  # the actual report body is still there

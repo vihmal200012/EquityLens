@@ -60,7 +60,7 @@ Nine tables, matching the spec exactly:
 | `valuation_assumptions` | One row per scenario (bear/base/bull) per valuation |
 | `portfolio_positions` | User-entered portfolio holdings |
 | `portfolio_snapshots` | Daily portfolio value, for return/vol/drawdown calcs |
-| `research_reports` | Generated report sections, flagged `ai_assisted` |
+| `research_reports` | Generated report sections, flagged `ai_assisted`. Written by `POST /companies/{ticker}/report` and every answered `POST /companies/{ticker}/ai/ask`; read back via `GET .../reports` (list) and `GET .../reports/{id}` (detail). `GET /report` is never persisted (see `backend/api/main.py`). |
 
 Every table that represents a fact carries a `source` enum
 (`demo` / `live_api` / `user_input` / `calculated`) and a timestamp, so the

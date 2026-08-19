@@ -41,7 +41,7 @@ backend/
   ai/              Structured context builder + Anthropic API client
   reports/         Deterministic 14-section report generator
   api/             FastAPI app wiring it all into REST endpoints
-tests/             57 unit tests + 18 API tests (75 total), all passing
+tests/             105 unit + API tests, all passing
 docs/              Architecture, financial model, data sources, AI design
 frontend/          Next.js (App Router, TypeScript, Tailwind) UI over the API
 ```
@@ -72,6 +72,16 @@ independently unit-testable against hand-computed expected values (see
 - **Investment research report generator**: all 14 sections from the spec,
   deterministic where possible, clearly labeled `[AI-GENERATED COMMENTARY]`
   where an LLM narrative is included
+- **Report & AI Q&A persistence**: an explicit `POST /report` (the
+  frontend's "Regenerate with session results") and every answered
+  `POST /ai/ask` are saved to the `research_reports` table; `GET
+  /companies/{ticker}/reports` lists saved entries and `GET
+  /companies/{ticker}/reports/{id}` retrieves one. The frontend's Report
+  and AI Assistant tabs surface these as "Saved Reports" / "Previous
+  Questions" lists. Persistence is best-effort — a database hiccup logs a
+  warning and returns `id: null` rather than failing an otherwise-successful
+  response. `GET /report` (fires on every page load) is intentionally never
+  persisted, to avoid flooding the table with un-requested duplicates.
 
 ## Financial methodology (summary — see `docs/FINANCIAL_MODEL.md`)
 
@@ -164,10 +174,11 @@ environment variables via `os.environ`.
 pytest tests/ -v
 ```
 
-75 tests, all passing: 57 unit tests (ratios, DCF, comparables, portfolio,
-reports, database models) plus 18 API tests, including an end-to-end test
-that mirrors the spec's required flow: search AAPL → load financials →
-compute ratios → run DCF → generate report.
+105 tests, all passing: unit tests (ratios, DCF, comparables, portfolio,
+reports, database models, LiveProvider field mapping) plus API tests,
+including an end-to-end test that mirrors the spec's required flow: search
+AAPL → load financials → compute ratios → run DCF → generate report, and
+persistence tests for the `research_reports` read/write endpoints.
 
 Every DCF test is checked against a fully hand-computed example (see the
 docstring in `tests/test_dcf.py`) — not just "does it run," but "does it
@@ -210,13 +221,16 @@ visit `http://localhost:3000`, or use the interactive API docs at
    frontend has no login/session handling yet either.
 4. Backtesting framework: replay historical DCF assumptions against
    subsequent actual price performance.
-5. Persist AI Q&A and generated reports to the `research_reports` table
-   (the schema supports it; the API doesn't write to it yet).
-6. WACC auto-calculation endpoint using live beta/risk-free-rate data,
+5. WACC auto-calculation endpoint using live beta/risk-free-rate data,
    rather than requiring the caller to compute WACC before calling `/dcf`.
-7. Move the frontend's per-tab DCF/comparables result sharing (currently
-   `sessionStorage`, see `frontend/src/lib/cache.ts`) server-side once
-   `research_reports` persistence (#5) exists.
+6. Move the frontend's per-tab DCF/comparables result sharing (currently
+   `sessionStorage`, see `frontend/src/lib/cache.ts`) server-side, now that
+   `research_reports` persistence exists.
+7. Persistence currently creates a `companies` row lazily on first save
+   (see `_get_or_create_company_row` in `backend/api/main.py`) rather than
+   requiring `python -m backend.database.seed` first — fine for demo
+   tickers, but a live deployment should decide whether that row should
+   also be kept in sync with the provider's profile data over time.
 
 ## Docs
 

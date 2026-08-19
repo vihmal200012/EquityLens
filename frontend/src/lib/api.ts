@@ -214,6 +214,10 @@ export interface AIAskResponse {
   question: string;
   answer: string;
   data_mode: DataMode;
+  // The research_reports row id this Q&A was saved under, or null if it
+  // couldn't be persisted (e.g. a database hiccup) -- the answer itself is
+  // still valid either way.
+  id: number | null;
 }
 
 export interface ReportResponse {
@@ -221,6 +225,35 @@ export interface ReportResponse {
   generated_at: string;
   data_mode: DataMode;
   sections: Record<string, string>;
+  // Only POST /report (an explicit "regenerate") is persisted; GET /report
+  // (fires automatically on every page load) always comes back with id: null.
+  id: number | null;
+}
+
+// A row in the research_reports table, as summarized by GET /reports.
+// Covers both full reports (generated_by: "equitylens-report-engine") and
+// saved AI Q&A (generated_by: "ai-research-assistant").
+export interface SavedReportSummary {
+  id: number;
+  title: string;
+  generated_by: string;
+  ai_assisted: boolean;
+  created_at: string;
+}
+
+export interface SavedReportsListResponse {
+  ticker: string;
+  reports: SavedReportSummary[];
+}
+
+export interface SavedReportDetail {
+  id: number;
+  ticker: string;
+  title: string;
+  sections: Record<string, string>;
+  generated_by: string;
+  ai_assisted: boolean;
+  created_at: string;
 }
 
 export interface HealthResponse {
@@ -266,6 +299,10 @@ export const api = {
   askAI: (ticker: string, question: string) =>
     post<AIAskResponse>(`/api/companies/${encodeURIComponent(ticker)}/ai/ask`, { question }),
   getQuickReport: (ticker: string) => get<ReportResponse>(`/api/companies/${encodeURIComponent(ticker)}/report`),
+  listSavedReports: (ticker: string) =>
+    get<SavedReportsListResponse>(`/api/companies/${encodeURIComponent(ticker)}/reports`),
+  getSavedReport: (ticker: string, id: number) =>
+    get<SavedReportDetail>(`/api/companies/${encodeURIComponent(ticker)}/reports/${id}`),
   getFullReport: (
     ticker: string,
     req: {
