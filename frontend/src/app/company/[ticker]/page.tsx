@@ -13,7 +13,10 @@ function Overview({ ticker }: { ticker: string }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([api.getCompany(ticker), api.getRatios(ticker, 1)])
+    // Growth ratios need a prior year to compare against, so request 2
+    // years even though only the latest year's ratios are displayed here —
+    // requesting just 1 leaves revenue_growth/eps_growth permanently null.
+    Promise.all([api.getCompany(ticker), api.getRatios(ticker, 2)])
       .then(([c, r]) => {
         setCompany(c);
         setRatios(r);

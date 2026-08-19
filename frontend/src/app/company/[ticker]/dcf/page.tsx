@@ -12,7 +12,7 @@ import {
 } from "@/lib/api";
 import { Card, StatCard } from "@/components/Card";
 import { ErrorBanner, LoadingState } from "@/components/StatusStates";
-import { fmtCurrency, fmtPercent } from "@/lib/format";
+import { fmtCurrency, fmtMoneyFromMillions, fmtPercent } from "@/lib/format";
 import SensitivityHeatmap from "@/components/charts/SensitivityHeatmap";
 import { setCached } from "@/lib/cache";
 
@@ -59,6 +59,14 @@ export default function DCFPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<"dcf" | "scenarios" | "sensitivity" | null>(null);
 
+  // A failed run must never leave a previous successful result on screen
+  // looking like it came from the request that just failed.
+  function clearResults() {
+    setResult(null);
+    setScenarios(null);
+    setSensitivity(null);
+  }
+
   function field(key: keyof typeof DEFAULTS, label: string) {
     return (
       <div>
@@ -83,6 +91,7 @@ export default function DCFPage() {
       setCached(ticker, "dcf_result", res);
       setCached(ticker, "dcf_assumptions", assumptions);
     } catch (e) {
+      clearResults();
       setError((e as ApiError).message);
     } finally {
       setLoading(null);
@@ -98,6 +107,7 @@ export default function DCFPage() {
       setScenarios(res);
       setCached(ticker, "dcf_scenarios", res);
     } catch (e) {
+      clearResults();
       setError((e as ApiError).message);
     } finally {
       setLoading(null);
@@ -112,6 +122,7 @@ export default function DCFPage() {
       const res = await api.runSensitivity(ticker, assumptions);
       setSensitivity(res);
     } catch (e) {
+      clearResults();
       setError((e as ApiError).message);
     } finally {
       setLoading(null);
@@ -169,11 +180,11 @@ export default function DCFPage() {
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
             <StatCard label="Implied Share Price" value={fmtCurrency(result.implied_share_price)} />
-            <StatCard label="Enterprise Value" value={fmtCurrency(result.enterprise_value, 0)} />
-            <StatCard label="Equity Value" value={fmtCurrency(result.equity_value, 0)} />
-            <StatCard label="Sum PV of FCF" value={fmtCurrency(result.sum_pv_fcf, 0)} />
-            <StatCard label="Terminal Value" value={fmtCurrency(result.terminal_value, 0)} />
-            <StatCard label="PV of Terminal Value" value={fmtCurrency(result.pv_terminal_value, 0)} />
+            <StatCard label="Enterprise Value" value={fmtMoneyFromMillions(result.enterprise_value)} />
+            <StatCard label="Equity Value" value={fmtMoneyFromMillions(result.equity_value)} />
+            <StatCard label="Sum PV of FCF" value={fmtMoneyFromMillions(result.sum_pv_fcf)} />
+            <StatCard label="Terminal Value" value={fmtMoneyFromMillions(result.terminal_value)} />
+            <StatCard label="PV of Terminal Value" value={fmtMoneyFromMillions(result.pv_terminal_value)} />
           </div>
 
           <Card className="overflow-x-auto">
@@ -194,15 +205,15 @@ export default function DCFPage() {
                 {result.forecast.map((f) => (
                   <tr key={f.year_index} className="border-b border-black/5 last:border-0 dark:border-white/5">
                     <td className="py-1.5 px-2">Y{f.year_index}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCurrency(f.revenue, 0)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCurrency(f.ebit, 0)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCurrency(f.nopat, 0)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCurrency(f.da, 0)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCurrency(f.capex, 0)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCurrency(f.nwc_change, 0)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCurrency(f.fcf, 0)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtMoneyFromMillions(f.revenue)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtMoneyFromMillions(f.ebit)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtMoneyFromMillions(f.nopat)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtMoneyFromMillions(f.da)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtMoneyFromMillions(f.capex)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtMoneyFromMillions(f.nwc_change)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtMoneyFromMillions(f.fcf)}</td>
                     <td className="py-1.5 px-2 text-right tabular-nums">{f.discount_factor.toFixed(3)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtCurrency(f.pv_fcf, 0)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums">{fmtMoneyFromMillions(f.pv_fcf)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -221,7 +232,7 @@ export default function DCFPage() {
                 key={name}
                 label={name}
                 value={fmtCurrency(s.implied_share_price)}
-                sub={`EV ${fmtCurrency(s.enterprise_value, 0)}`}
+                sub={`EV ${fmtMoneyFromMillions(s.enterprise_value)}`}
               />
             ))}
           </div>

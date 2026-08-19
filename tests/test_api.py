@@ -91,6 +91,19 @@ def test_ratios_endpoint():
     assert ratios[latest]["gross_margin"] is not None
 
 
+def test_ratios_endpoint_with_years_2_computes_latest_revenue_growth():
+    """Regression test: the Overview page used to request years=1, which
+    can never populate revenue_growth/eps_growth (no prior year to compare
+    against), so it always displayed "—". years=2 is the minimum that lets
+    the latest year's growth be computed."""
+    r = client.get("/api/companies/AAPL/ratios", params={"years": 2})
+    assert r.status_code == 200
+    ratios = r.json()["ratios_by_year"]
+    assert len(ratios) == 2
+    latest = max(int(fy) for fy in ratios.keys())
+    assert ratios[str(latest)]["revenue_growth"] is not None
+
+
 def test_dcf_endpoint_matches_engine_within_rounding():
     r = client.post("/api/companies/AAPL/dcf", json=DCF_PAYLOAD)
     assert r.status_code == 200
@@ -153,6 +166,53 @@ def test_portfolio_analyze_endpoint():
     assert "correlation_matrix" in body
 
 
+def test_portfolio_analyze_defaults_periods_per_year_to_252_and_echoes_it():
+    payload = {"prices_by_ticker": {"AAPL": [100, 102, 101, 105, 103, 108]}}
+    r = client.post("/api/portfolio/analyze", json=payload)
+    assert r.status_code == 200
+    assert r.json()["periods_per_year"] == 252
+
+
+def test_portfolio_analyze_respects_explicit_periods_per_year():
+    """Regression test: annualization used to hardcode 252 trading days with
+    no way for the caller to say the price series is weekly/monthly, so a
+    short demo series produced a nonsensical annualized return (e.g. >1000%
+    for 9 data points). Passing periods_per_year should change the
+    annualized figures deterministically and be echoed back unchanged."""
+    payload = {"prices_by_ticker": {"AAPL": [100, 102, 101, 105, 103, 108]}, "periods_per_year": 12}
+    r = client.post("/api/portfolio/analyze", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["periods_per_year"] == 12
+
+    payload_252 = {**payload, "periods_per_year": 252}
+    r_252 = client.post("/api/portfolio/analyze", json=payload_252)
+    assert r_252.status_code == 200
+    body_252 = r_252.json()
+
+    # Same price series, different annualization frequency -> different
+    # (and much smaller, since 12 << 252) annualized return/volatility.
+    assert body["annualized_return"] != body_252["annualized_return"]
+    assert abs(body["annualized_return"]) < abs(body_252["annualized_return"])
+
+
+def test_portfolio_analyze_correlation_matrix_contract():
+    """Pins the {"tickers": [...], "matrix": [[...]]} shape the frontend
+    relies on (see analytics.correlation_matrix's docstring) — NOT a nested
+    per-ticker dict. Regressing this shape silently breaks the Portfolio
+    page's Correlation Matrix table."""
+    payload = {"prices_by_ticker": {"AAPL": [100, 102, 101, 105, 103, 108], "MSFT": [50, 51, 49, 52, 53, 55]}}
+    r = client.post("/api/portfolio/analyze", json=payload)
+    assert r.status_code == 200
+    corr = r.json()["correlation_matrix"]
+    assert corr["tickers"] == ["AAPL", "MSFT"]
+    assert len(corr["matrix"]) == 2
+    assert len(corr["matrix"][0]) == 2
+    assert corr["matrix"][0][0] == pytest.approx(1.0)
+    assert corr["matrix"][1][1] == pytest.approx(1.0)
+    assert corr["matrix"][0][1] == pytest.approx(corr["matrix"][1][0])
+
+
 def test_portfolio_analyze_rejects_mismatched_lengths():
     payload = {"prices_by_ticker": {"AAPL": [100, 102], "MSFT": [50, 51, 52]}}
     r = client.post("/api/portfolio/analyze", json=payload)
@@ -212,6 +272,28 @@ def test_post_report_with_no_body_matches_get_report_placeholders():
     r = client.post("/api/companies/AAPL/report", json={})
     assert r.status_code == 200
     assert r.json()["sections"]["dcf_valuation"] == "No DCF has been run for this company yet."
+
+
+def test_post_report_includes_scenarios_from_dcf_scenarios_endpoint():
+    """Regression test: the frontend caches the *entire* /dcf/scenarios
+    response ({ticker, data_mode, scenarios: {bear, base, bull}}) and used
+    to POST that whole object as the report's "scenarios" field. The report
+    generator expects just the inner {bear, base, bull} map, so the
+    scenarios section silently rendered as if nothing had been run. This
+    replays the corrected frontend flow end-to-end: call /dcf/scenarios,
+    forward only its `.scenarios` field to /report, and confirm the
+    scenarios section is actually populated."""
+    scenarios_resp = client.post("/api/companies/AAPL/dcf/scenarios", json=DCF_PAYLOAD)
+    assert scenarios_resp.status_code == 200
+    scenarios = scenarios_resp.json()["scenarios"]
+
+    r = client.post("/api/companies/AAPL/report", json={"scenarios": scenarios})
+    assert r.status_code == 200
+    section = r.json()["sections"]["scenarios"]
+    assert section != "No scenario analysis has been run yet."
+    assert "Bear:" in section
+    assert "Base:" in section
+    assert "Bull:" in section
 
 
 def test_financials_falls_back_to_demo_when_live_provider_fails(monkeypatch):

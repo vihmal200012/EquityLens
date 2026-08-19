@@ -66,6 +66,71 @@ def test_ai_narrative_labeled_when_present():
     assert "[AI-GENERATED COMMENTARY]" in report["sections"]["key_catalysts"]
 
 
+def test_scenarios_section_renders_bear_base_bull_prices():
+    """The scenarios section expects the flat {"bear": {...}, "base": {...},
+    "bull": {...}} shape documented on ReportInputs.scenarios — NOT the full
+    /dcf/scenarios response envelope ({ticker, data_mode, scenarios: {...}})."""
+    report = build_report(
+        make_inputs(
+            scenarios={
+                "bear": {"implied_share_price": 65.90},
+                "base": {"implied_share_price": 97.63},
+                "bull": {"implied_share_price": 150.82},
+            }
+        )
+    )
+    section = report["sections"]["scenarios"]
+    assert "Bear: implied price $65.90" in section
+    assert "Base: implied price $97.63" in section
+    assert "Bull: implied price $150.82" in section
+
+
+def test_ratios_and_comparables_are_rounded_for_presentation():
+    """Regression test: debt_to_equity/current_ratio/net_debt_to_ebitda and
+    comparables multiples/implied prices used to be interpolated as raw
+    floats (e.g. "0.24692826264011886"), not the underlying calculation.
+    Presentation should round to 2dp without changing the computed value."""
+    report = build_report(
+        make_inputs(
+            ratios_by_year={
+                2023: {"gross_margin": 0.38, "revenue_growth": None},
+                2024: {
+                    "gross_margin": 0.40,
+                    "revenue_growth": 0.111,
+                    "net_margin": 0.144,
+                    "roe": 0.24,
+                    "roic": 0.20,
+                    "debt_to_equity": 0.24692826264011886,
+                    "current_ratio": 2.3356293348425603,
+                    "net_debt_to_ebitda": 0.3556658395368073,
+                },
+            },
+            comparables={
+                "median_pe": 7.284090909090909,
+                "median_ev_ebitda": 7.284090909090909,
+                "median_ev_revenue": 1.6111111111111112,
+                "implied_price_from_pe": 71.41291612903225,
+                "implied_price_from_ev_ebitda": None,
+            },
+        )
+    )
+    ratios_section = report["sections"]["key_financial_ratios"]
+    risks_section = report["sections"]["key_risks"]
+    comps_section = report["sections"]["comparable_company_valuation"]
+
+    assert "D/E 0.25" in ratios_section
+    assert "Current Ratio 2.34" in ratios_section
+    assert "Debt/Equity 0.25" in risks_section
+    assert "Net Debt/EBITDA 0.36" in risks_section
+    assert "Median P/E: 7.28" in comps_section
+    assert "Implied price (P/E): $71.41" in comps_section
+    assert "Implied price (EV/EBITDA): n/a" in comps_section
+
+    for section in (ratios_section, risks_section, comps_section):
+        assert "26264011886" not in section
+        assert "090909090909" not in section
+
+
 def test_valuation_summary_reflects_dcf_and_comps():
     report = build_report(
         make_inputs(

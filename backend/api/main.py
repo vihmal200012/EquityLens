@@ -380,6 +380,12 @@ class PortfolioRequest(BaseModel):
     weights: dict[str, float] | None = None
     benchmark_prices: list[float] | None = None
     risk_free_rate_annual: float = 0.0
+    # Annualization/Sharpe/volatility assume this many price observations
+    # per year. Default (252) matches daily trading days -- callers with
+    # weekly/monthly price series must override this or the annualized
+    # figures will be wildly wrong. Echoed back in the response so the UI
+    # can always show what assumption was actually used.
+    periods_per_year: int = Field(252, ge=1, le=366)
 
 
 @app.post("/api/portfolio/analyze")
@@ -402,10 +408,12 @@ def analyze_portfolio(req: PortfolioRequest):
 
     try:
         tr = portfolio_analytics.total_return(portfolio_prices)
-        ar = portfolio_analytics.annualized_return(portfolio_prices)
+        ar = portfolio_analytics.annualized_return(portfolio_prices, periods_per_year=req.periods_per_year)
         port_returns = portfolio_analytics.prices_to_returns(portfolio_prices)
-        vol = portfolio_analytics.volatility(port_returns)
-        sharpe = portfolio_analytics.sharpe_ratio(port_returns, req.risk_free_rate_annual)
+        vol = portfolio_analytics.volatility(port_returns, periods_per_year=req.periods_per_year)
+        sharpe = portfolio_analytics.sharpe_ratio(
+            port_returns, req.risk_free_rate_annual, periods_per_year=req.periods_per_year
+        )
         dd = portfolio_analytics.max_drawdown(portfolio_prices)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -419,6 +427,9 @@ def analyze_portfolio(req: PortfolioRequest):
         "weights": weights,
         "portfolio_value_series": portfolio_prices,
         "drawdown_series": dd.drawdown_series,
+        # Echoed back so the UI can always display the assumption actually
+        # used, rather than silently guessing at the caller's data frequency.
+        "periods_per_year": req.periods_per_year,
     }
 
     if req.benchmark_prices:

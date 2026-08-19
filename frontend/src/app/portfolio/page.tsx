@@ -30,6 +30,7 @@ export default function PortfolioPage() {
   const [rows, setRows] = useState<PositionRow[]>(DEFAULT_ROWS);
   const [benchmark, setBenchmark] = useState("");
   const [riskFreeRatePct, setRiskFreeRatePct] = useState("2");
+  const [periodsPerYear, setPeriodsPerYear] = useState("252");
   const [result, setResult] = useState<PortfolioResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -70,9 +71,13 @@ export default function PortfolioPage() {
         weights: useWeights ? weights : undefined,
         benchmark_prices,
         risk_free_rate_annual: (parseFloat(riskFreeRatePct) || 0) / 100,
+        periods_per_year: parseInt(periodsPerYear, 10) || 252,
       });
       setResult(res);
     } catch (e) {
+      // Don't leave a previous successful result on screen looking like it
+      // came from the request that just failed.
+      setResult(null);
       setError((e as ApiError).message);
     } finally {
       setLoading(false);
@@ -172,6 +177,20 @@ export default function PortfolioPage() {
                 className="w-full rounded-md border border-black/15 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-black/40 dark:border-white/15 dark:focus:border-white/40"
               />
             </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-black/60 dark:text-white/60">
+                Price observations per year
+              </label>
+              <input
+                value={periodsPerYear}
+                onChange={(e) => setPeriodsPerYear(e.target.value)}
+                className="w-full rounded-md border border-black/15 bg-transparent px-3 py-1.5 text-sm outline-none focus:border-black/40 dark:border-white/15 dark:focus:border-white/40"
+              />
+              <p className="mt-1 text-xs text-black/40 dark:text-white/40">
+                How the price series above is annualized: 252 for daily prices, 52 for weekly, 12 for monthly. Wrong
+                value ⇒ misleading Annualized Return / Volatility / Sharpe.
+              </p>
+            </div>
           </div>
 
           <button
@@ -189,6 +208,10 @@ export default function PortfolioPage() {
 
       {result ? (
         <div className="space-y-6">
+          <p className="text-xs text-black/50 dark:text-white/50">
+            Annualized Return, Volatility, and Sharpe Ratio below assume{" "}
+            <span className="font-medium">{result.periods_per_year} price observations per year</span>.
+          </p>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
             <StatCard label="Total Return" value={fmtPercent(result.total_return)} />
             <StatCard label="Annualized Return" value={fmtPercent(result.annualized_return)} />
@@ -215,7 +238,7 @@ export default function PortfolioPage() {
                 <thead>
                   <tr className="border-b border-black/10 dark:border-white/10">
                     <th className="py-1.5 px-2 text-left" />
-                    {Object.keys(result.correlation_matrix).map((t) => (
+                    {result.correlation_matrix.tickers.map((t) => (
                       <th key={t} className="py-1.5 px-2 text-right font-medium text-black/50 dark:text-white/50">
                         {t}
                       </th>
@@ -223,12 +246,12 @@ export default function PortfolioPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(result.correlation_matrix).map(([t, row]) => (
+                  {result.correlation_matrix.tickers.map((t, i) => (
                     <tr key={t} className="border-b border-black/5 last:border-0 dark:border-white/5">
                       <td className="py-1.5 px-2 font-medium">{t}</td>
-                      {Object.keys(result.correlation_matrix!).map((t2) => (
+                      {result.correlation_matrix!.tickers.map((t2, j) => (
                         <td key={t2} className="py-1.5 px-2 text-right tabular-nums">
-                          {fmtNumber(row[t2], 2)}
+                          {fmtNumber(result.correlation_matrix!.matrix[i][j], 2)}
                         </td>
                       ))}
                     </tr>

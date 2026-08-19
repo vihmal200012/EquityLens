@@ -39,6 +39,22 @@ def _fmt_pct(v) -> str:
     return f"{v * 100:.1f}%"
 
 
+def _fmt_ratio(v) -> str:
+    """Presentation rounding for plain ratios/multiples (D/E, current ratio,
+    P/E, EV/EBITDA, ...) — does not touch the underlying computed value."""
+    if v is None:
+        return "n/a"
+    return f"{v:.2f}"
+
+
+def _fmt_price(v) -> str:
+    """Presentation rounding for a per-share dollar figure (not a
+    millions-denominated amount, so no _fmt_money 'M' suffix)."""
+    if v is None:
+        return "n/a"
+    return f"${v:,.2f}"
+
+
 def build_report(inputs: ReportInputs) -> dict:
     sections: dict[str, str] = {}
     demo_notice = (
@@ -88,7 +104,7 @@ def build_report(inputs: ReportInputs) -> dict:
         lines.append(
             f"FY{fy}: Gross {_fmt_pct(r.get('gross_margin'))} | Op {_fmt_pct(r.get('operating_margin'))} | "
             f"Net {_fmt_pct(r.get('net_margin'))} | ROE {_fmt_pct(r.get('roe'))} | ROIC {_fmt_pct(r.get('roic'))} | "
-            f"D/E {r.get('debt_to_equity')} | Current Ratio {r.get('current_ratio')}"
+            f"D/E {_fmt_ratio(r.get('debt_to_equity'))} | Current Ratio {_fmt_ratio(r.get('current_ratio'))}"
         )
     sections["key_financial_ratios"] = "\n".join(lines)
 
@@ -131,11 +147,11 @@ def build_report(inputs: ReportInputs) -> dict:
         c = inputs.comparables
         sections["comparable_company_valuation"] = (
             demo_notice
-            + f"Median P/E: {c.get('median_pe')}, Median EV/EBITDA: {c.get('median_ev_ebitda')}, "
-              f"Median EV/Revenue: {c.get('median_ev_revenue')}\n"
-              f"Implied price (P/E): ${c.get('implied_price_from_pe')}\n"
-              f"Implied price (EV/EBITDA): ${c.get('implied_price_from_ev_ebitda')}\n"
-              f"Implied price (EV/Revenue): ${c.get('implied_price_from_ev_revenue')}\n"
+            + f"Median P/E: {_fmt_ratio(c.get('median_pe'))}, Median EV/EBITDA: {_fmt_ratio(c.get('median_ev_ebitda'))}, "
+              f"Median EV/Revenue: {_fmt_ratio(c.get('median_ev_revenue'))}\n"
+              f"Implied price (P/E): {_fmt_price(c.get('implied_price_from_pe'))}\n"
+              f"Implied price (EV/EBITDA): {_fmt_price(c.get('implied_price_from_ev_ebitda'))}\n"
+              f"Implied price (EV/Revenue): {_fmt_price(c.get('implied_price_from_ev_revenue'))}\n"
               f"{c.get('methodology_note', '')}"
         )
     else:
@@ -168,9 +184,9 @@ def build_report(inputs: ReportInputs) -> dict:
     else:
         sections["key_risks"] = (
             "Quantitative risk flags: "
-            + f"Net Debt/EBITDA {latest_ratios.get('net_debt_to_ebitda')}, "
-            + f"Current Ratio {latest_ratios.get('current_ratio')}, "
-            + f"Debt/Equity {latest_ratios.get('debt_to_equity')}."
+            + f"Net Debt/EBITDA {_fmt_ratio(latest_ratios.get('net_debt_to_ebitda'))}, "
+            + f"Current Ratio {_fmt_ratio(latest_ratios.get('current_ratio'))}, "
+            + f"Debt/Equity {_fmt_ratio(latest_ratios.get('debt_to_equity'))}."
         )
 
     # 12. Valuation Summary

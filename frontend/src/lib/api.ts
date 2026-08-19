@@ -179,6 +179,17 @@ export interface PortfolioRequestInput {
   weights?: Record<string, number> | null;
   benchmark_prices?: number[] | null;
   risk_free_rate_annual?: number;
+  // Price observations per year, for annualizing return/volatility/Sharpe.
+  // Defaults to 252 (daily trading days) on the backend if omitted.
+  periods_per_year?: number;
+}
+
+// Matches backend/portfolio/analytics.py::correlation_matrix — a
+// JSON-friendly matrix keyed by parallel ticker order, not a nested
+// per-ticker dict.
+export interface CorrelationMatrix {
+  tickers: string[];
+  matrix: number[][];
 }
 
 export interface PortfolioResponse {
@@ -191,7 +202,11 @@ export interface PortfolioResponse {
   portfolio_value_series: number[];
   drawdown_series: number[];
   beta?: number;
-  correlation_matrix?: Record<string, Record<string, number>>;
+  correlation_matrix?: CorrelationMatrix;
+  // The annualization frequency actually used, echoed back by the backend
+  // (see PortfolioRequestInput.periods_per_year) so the UI can always show
+  // the assumption behind the annualized figures.
+  periods_per_year: number;
 }
 
 export interface AIAskResponse {

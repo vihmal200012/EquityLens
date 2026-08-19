@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { api, ApiError, ReportResponse } from "@/lib/api";
+import { api, ApiError, DCFScenariosResponse, ReportResponse } from "@/lib/api";
 import { Card } from "@/components/Card";
 import { ErrorBanner, LoadingState } from "@/components/StatusStates";
 import DataModeBadge from "@/components/DataModeBadge";
@@ -33,11 +33,16 @@ function Report({ ticker }: { ticker: string }) {
     setLoading(true);
     setError(null);
     try {
+      // dcf_scenarios is cached as the full /dcf/scenarios response
+      // ({ticker, data_mode, scenarios: {bear, base, bull}}) — the report
+      // endpoint expects just the inner {bear, base, bull} map, not the
+      // whole response, or the scenarios section silently renders empty.
+      const scenariosResponse = getCached<DCFScenariosResponse>(ticker, "dcf_scenarios");
       const res = await api.getFullReport(ticker, {
         dcf_result: getCached(ticker, "dcf_result") ?? undefined,
         dcf_assumptions: getCached(ticker, "dcf_assumptions") ?? undefined,
         comparables: getCached(ticker, "comparables") ?? undefined,
-        scenarios: getCached(ticker, "dcf_scenarios") ?? undefined,
+        scenarios: scenariosResponse?.scenarios ?? undefined,
       });
       setReport(res);
     } catch (e) {

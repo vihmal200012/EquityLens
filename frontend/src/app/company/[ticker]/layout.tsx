@@ -6,7 +6,7 @@ import { api, ApiError, CompanyProfile } from "@/lib/api";
 import DataModeBadge from "@/components/DataModeBadge";
 import CompanyTabs from "@/components/CompanyTabs";
 import { ErrorBanner, LoadingState } from "@/components/StatusStates";
-import { fmtBigNumber, fmtCurrency } from "@/lib/format";
+import { fmtCurrency, fmtMoneyFromMillions } from "@/lib/format";
 
 function CompanyHeader({ ticker }: { ticker: string }) {
   const [company, setCompany] = useState<CompanyProfile | null>(null);
@@ -42,11 +42,11 @@ function CompanyHeader({ ticker }: { ticker: string }) {
         </div>
         <div>
           <div className="text-xs uppercase tracking-wide text-black/50 dark:text-white/50">Market Cap</div>
-          <div className="text-lg font-semibold tabular-nums">{fmtBigNumber(company.market_cap)}</div>
+          <div className="text-lg font-semibold tabular-nums">{fmtMoneyFromMillions(company.market_cap)}</div>
         </div>
         <div>
           <div className="text-xs uppercase tracking-wide text-black/50 dark:text-white/50">Enterprise Value</div>
-          <div className="text-lg font-semibold tabular-nums">{fmtBigNumber(company.enterprise_value)}</div>
+          <div className="text-lg font-semibold tabular-nums">{fmtMoneyFromMillions(company.enterprise_value)}</div>
         </div>
       </div>
     </div>

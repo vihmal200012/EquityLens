@@ -5,13 +5,22 @@ import { useParams } from "next/navigation";
 import { api, ApiError, FinancialsResponse } from "@/lib/api";
 import { Card } from "@/components/Card";
 import { ErrorBanner, LoadingState } from "@/components/StatusStates";
-import { fmtBigNumber, titleCase } from "@/lib/format";
+import { fmtCurrency, fmtMoneyFromMillions, fmtSharesFromMillions, titleCase } from "@/lib/format";
 
 const STATEMENTS: { key: "income_statement" | "balance_sheet" | "cash_flow"; label: string }[] = [
   { key: "income_statement", label: "Income Statement" },
   { key: "balance_sheet", label: "Balance Sheet" },
   { key: "cash_flow", label: "Cash Flow Statement" },
 ];
+
+// Most line items are dollar amounts in millions, but a handful are
+// per-share dollars (eps) or a share count (shares_outstanding) — those
+// must not be scaled/formatted as millions-denominated currency.
+function formatLineItem(stmtKey: string, item: string, value: number): string {
+  if (stmtKey === "income_statement" && item === "eps") return fmtCurrency(value);
+  if (stmtKey === "balance_sheet" && item === "shares_outstanding") return fmtSharesFromMillions(value);
+  return fmtMoneyFromMillions(value);
+}
 
 function Financials({ ticker }: { ticker: string }) {
   const [data, setData] = useState<FinancialsResponse | null>(null);
@@ -55,7 +64,7 @@ function Financials({ ticker }: { ticker: string }) {
                     <td className="py-1.5 pr-4">{titleCase(item)}</td>
                     {years.map((y) => (
                       <td key={y.fiscal_year} className="py-1.5 pl-4 text-right tabular-nums">
-                        {fmtBigNumber(y[stmt.key][item])}
+                        {formatLineItem(stmt.key, item, y[stmt.key][item])}
                       </td>
                     ))}
                   </tr>
