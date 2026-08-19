@@ -6,12 +6,14 @@ model, comparable-company analysis, portfolio analytics, an AI research
 assistant grounded in structured financial data, and investment research
 report generation.
 
-> **Status: Phase 1 of the frontend is not built yet.** This is the
-> foundation layer — database, provider abstraction, financial engine,
+> **Status: backend + a Next.js frontend are both built.** The backend is
+> the foundation layer — database, provider abstraction, financial engine,
 > valuation engine, portfolio analytics, AI layer, report generator, and a
-> full FastAPI backend, all with unit + API tests. It's usable today via
-> the API (or `curl`/Postman/the interactive `/docs` page); a web frontend
-> is the natural next phase. See **Limitations** below.
+> full FastAPI backend, all with unit + API tests. `frontend/` is a
+> Next.js (App Router, TypeScript, Tailwind) app that consumes this API:
+> dashboard, a per-company workspace (overview, financials, ratios, DCF
+> with scenarios/sensitivity, comparables, AI assistant, report), and a
+> portfolio analyzer. See **Limitations** below.
 
 ## Why this exists
 
@@ -41,6 +43,7 @@ backend/
   api/             FastAPI app wiring it all into REST endpoints
 tests/             57 unit tests + 18 API tests (75 total), all passing
 docs/              Architecture, financial model, data sources, AI design
+frontend/          Next.js (App Router, TypeScript, Tailwind) UI over the API
 ```
 
 The financial engine, valuation engine, and portfolio engine are all pure
@@ -119,6 +122,20 @@ uvicorn backend.api.main:app --reload
 
 Then open `http://localhost:8000/docs` for the interactive API explorer, or:
 
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev   # http://localhost:3000, expects the API at http://localhost:8000
+```
+
+`frontend/.env.local` sets `NEXT_PUBLIC_API_URL` (defaults to `http://localhost:8000`);
+the backend's CORS config already allows `http://localhost:3000`. Run
+`npm run build` for a production build and `npm run lint` for ESLint.
+
+Or, without the frontend:
+
 ```bash
 curl http://localhost:8000/api/companies/AAPL
 curl http://localhost:8000/api/companies/AAPL/ratios
@@ -158,15 +175,16 @@ produce the mathematically correct number."
 
 ## Example screenshots
 
-No frontend exists yet (see Limitations), so there's nothing to screenshot.
-The interactive API docs at `/docs` (FastAPI's auto-generated Swagger UI)
-are the closest thing to a UI right now.
+No screenshots checked in yet — run both servers (see Installation) and
+visit `http://localhost:3000`, or use the interactive API docs at
+`http://localhost:8000/docs`.
 
 ## Limitations
 
-- **No frontend yet.** This phase is the data/engine/API layer. The pages
-  described in the original spec (`/dashboard`, `/company/[ticker]`, etc.)
-  haven't been built.
+- **Frontend fetches client-side against a separate origin.** Pages are
+  client components that call the FastAPI backend directly from the
+  browser; there's no server-side rendering of live data and no auth, so
+  it's a local/demo deployment shape, not yet production-hardened.
 - **DEMO MODE data is synthetic**, not real filings — clearly labeled, but
   worth repeating: don't use these numbers for actual investment decisions.
 - **`LiveProvider` is a working skeleton**, not validated against a live
@@ -184,18 +202,21 @@ are the closest thing to a UI right now.
 
 ## Suggested next improvements
 
-1. Build the frontend (Next.js/React, per the original architecture) against
-   this API — dashboard, company page with tabs, sensitivity heatmap, etc.
-2. Wire `LiveProvider` up to a real key and validate against actual API responses.
-3. Add PDF export of the research report (e.g. via WeasyPrint or a headless
-   browser rendering a report template).
-4. Add auth (API keys or JWT) before any multi-user deployment.
-5. Backtesting framework: replay historical DCF assumptions against
+1. Wire `LiveProvider` up to a real key and validate against actual API responses.
+2. Add PDF export of the research report (e.g. via WeasyPrint or a headless
+   browser rendering a report template) — the frontend's Report tab would
+   link to it.
+3. Add auth (API keys or JWT) before any multi-user deployment; the
+   frontend has no login/session handling yet either.
+4. Backtesting framework: replay historical DCF assumptions against
    subsequent actual price performance.
-6. Persist AI Q&A and generated reports to the `research_reports` table
+5. Persist AI Q&A and generated reports to the `research_reports` table
    (the schema supports it; the API doesn't write to it yet).
-7. WACC auto-calculation endpoint using live beta/risk-free-rate data,
+6. WACC auto-calculation endpoint using live beta/risk-free-rate data,
    rather than requiring the caller to compute WACC before calling `/dcf`.
+7. Move the frontend's per-tab DCF/comparables result sharing (currently
+   `sessionStorage`, see `frontend/src/lib/cache.ts`) server-side once
+   `research_reports` persistence (#5) exists.
 
 ## Docs
 
