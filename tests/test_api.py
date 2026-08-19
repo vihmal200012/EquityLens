@@ -1,7 +1,9 @@
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from backend.api.main import app
+from backend.api.main import _net_debt_and_shares, app
+from backend.financial_engine.ratios import YearFinancials
 
 client = TestClient(app)
 
@@ -138,6 +140,49 @@ def test_report_endpoint_has_all_sections():
     assert len(r.json()["sections"]) == 14
 
 
+def test_net_debt_and_shares_raises_422_when_shares_missing():
+    """Regression test: /dcf/scenarios, /dcf/sensitivity, and /comparables
+    used to skip this check (only /dcf had it), so a provider that doesn't
+    populate shares_outstanding (e.g. a live one) would crash those three
+    endpoints with an unhandled 500 instead of a clean 422."""
+    yf = YearFinancials(
+        fiscal_year=2024,
+        income={},
+        balance={"total_debt": 100.0, "cash_and_equivalents": 50.0},
+        cash_flow={},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _net_debt_and_shares(yf)
+    assert exc_info.value.status_code == 422
+
+
+def test_post_report_includes_dcf_and_comparables_results():
+    """The GET /report endpoint never had a way to include a DCF or comps
+    result (confirmed live: run a DCF, then GET /report, and it still says
+    'No DCF has been run yet'). POST /report accepts precomputed results so
+    the report reflects the same numbers already shown elsewhere."""
+    dcf_result = {
+        "implied_share_price": 105.41,
+        "enterprise_value": 1676816.0,
+        "equity_value": 1633816.0,
+        "sum_pv_fcf": 424886.3,
+        "pv_terminal_value": 1251929.7,
+    }
+    comparables = {"implied_price_from_pe": 120.0, "median_pe": 22.0}
+    r = client.post("/api/companies/AAPL/report", json={"dcf_result": dcf_result, "comparables": comparables})
+    assert r.status_code == 200
+    body = r.json()
+    assert "$105.41" in body["sections"]["dcf_valuation"]
+    assert "DCF: $105.41" in body["sections"]["valuation_summary"]
+    assert "Comps (P/E): $120.00" in body["sections"]["valuation_summary"]
+
+
+def test_post_report_with_no_body_matches_get_report_placeholders():
+    r = client.post("/api/companies/AAPL/report", json={})
+    assert r.status_code == 200
+    assert r.json()["sections"]["dcf_valuation"] == "No DCF has been run for this company yet."
+
+
 def test_end_to_end_aapl_flow():
     """Search AAPL -> financials -> ratios -> DCF -> report, per spec's required E2E test."""
     assert client.get("/api/companies/AAPL").status_code == 200
@@ -148,3 +193,9 @@ def test_end_to_end_aapl_flow():
     report = client.get("/api/companies/AAPL/report")
     assert report.status_code == 200
     assert "AAPL" in report.json()["title"]
+
+    # the DCF just run actually flows into the report when passed through
+    full_report = client.post("/api/companies/AAPL/report", json={"dcf_result": dcf.json()})
+    assert full_report.status_code == 200
+    price_str = f"{dcf.json()['implied_share_price']:.2f}"
+    assert price_str in full_report.json()["sections"]["dcf_valuation"]

@@ -81,6 +81,27 @@ def _load_years(ticker: str, years: int = 5) -> list[YearFinancials]:
     ]
 
 
+def _net_debt_and_shares(latest: YearFinancials) -> tuple[float, float]:
+    """Shared by every endpoint that bridges enterprise value to a per-share
+    price. Raises a clean 422 if shares_outstanding is missing rather than
+    letting a bare-None division blow up as an unhandled 500 — this matters
+    once a provider (e.g. a live one) doesn't populate every field the demo
+    data always has."""
+    net_debt = latest.balance.get("total_debt", 0) - latest.balance.get("cash_and_equivalents", 0)
+    shares = latest.balance.get("shares_outstanding")
+    if not shares:
+        raise HTTPException(status_code=422, detail="Missing shares_outstanding for this company.")
+    return net_debt, shares
+
+
+def _company_and_ratios(ticker: str, years: int = 5):
+    year_objs = _load_years(ticker, years)
+    ratios = compute_ratio_series(year_objs)
+    profile = provider.get_company_profile(ticker)
+    company = {"ticker": profile.ticker, "name": profile.name, "sector": profile.sector, "industry": profile.industry}
+    return year_objs, ratios, company
+
+
 # ---------------------------------------------------------------------------
 # A. Company search / profile
 # ---------------------------------------------------------------------------
@@ -163,10 +184,7 @@ class DCFRequest(BaseModel):
 def run_dcf_valuation(ticker: str, req: DCFRequest):
     year_objs = _load_years(ticker, 1)
     latest = year_objs[-1]
-    net_debt = latest.balance.get("total_debt", 0) - latest.balance.get("cash_and_equivalents", 0)
-    shares = latest.balance.get("shares_outstanding")
-    if not shares:
-        raise HTTPException(status_code=422, detail="Missing shares_outstanding for this company.")
+    net_debt, shares = _net_debt_and_shares(latest)
 
     assumptions = DCFAssumptions(
         base_revenue=latest.income["revenue"],
@@ -204,8 +222,7 @@ def run_dcf_valuation(ticker: str, req: DCFRequest):
 def run_dcf_scenarios(ticker: str, req: DCFRequest):
     year_objs = _load_years(ticker, 1)
     latest = year_objs[-1]
-    net_debt = latest.balance.get("total_debt", 0) - latest.balance.get("cash_and_equivalents", 0)
-    shares = latest.balance.get("shares_outstanding")
+    net_debt, shares = _net_debt_and_shares(latest)
 
     base = DCFAssumptions(
         base_revenue=latest.income["revenue"],
@@ -238,8 +255,7 @@ def run_dcf_scenarios(ticker: str, req: DCFRequest):
 def run_sensitivity(ticker: str, req: DCFRequest, wacc_min: float = 0.06, wacc_max: float = 0.14, growth_min: float = 0.0, growth_max: float = 0.04):
     year_objs = _load_years(ticker, 1)
     latest = year_objs[-1]
-    net_debt = latest.balance.get("total_debt", 0) - latest.balance.get("cash_and_equivalents", 0)
-    shares = latest.balance.get("shares_outstanding")
+    net_debt, shares = _net_debt_and_shares(latest)
 
     base = DCFAssumptions(
         base_revenue=latest.income["revenue"],
@@ -285,8 +301,7 @@ class ComparablesRequest(BaseModel):
 def run_comparables(ticker: str, req: ComparablesRequest):
     year_objs = _load_years(ticker, 1)
     latest = year_objs[-1]
-    net_debt = latest.balance.get("total_debt", 0) - latest.balance.get("cash_and_equivalents", 0)
-    shares = latest.balance.get("shares_outstanding")
+    net_debt, shares = _net_debt_and_shares(latest)
 
     peers = [PeerFinancials(**p.model_dump()) for p in req.peers]
     try:
@@ -392,12 +407,10 @@ def ask_ai(ticker: str, req: AIQuestionRequest, request: Request):
     client_id = request.client.host if request.client else "unknown"
     _check_rate_limit(client_id)
 
-    year_objs = _load_years(ticker, 5)
-    ratios = compute_ratio_series(year_objs)
-    profile = provider.get_company_profile(ticker)
+    year_objs, ratios, company = _company_and_ratios(ticker, 5)
 
     ctx = AIContext(
-        company={"ticker": profile.ticker, "name": profile.name, "sector": profile.sector, "industry": profile.industry},
+        company=company,
         financials={y.fiscal_year: {"income_statement": y.income, "balance_sheet": y.balance, "cash_flow": y.cash_flow} for y in year_objs},
         ratios=ratios,
         data_mode=provider.name,
@@ -420,15 +433,47 @@ def ask_ai(ticker: str, req: AIQuestionRequest, request: Request):
 
 @app.get("/api/companies/{ticker}/report")
 def generate_report(ticker: str):
-    year_objs = _load_years(ticker, 5)
-    ratios = compute_ratio_series(year_objs)
-    profile = provider.get_company_profile(ticker)
+    """Quick report from financials/ratios alone — no valuation section
+    filled in. Use POST /report to include DCF/comparables/scenario/AI
+    results the caller already computed (see that handler's docstring)."""
+    year_objs, ratios, company = _company_and_ratios(ticker, 5)
 
     inputs = ReportInputs(
-        company={"ticker": profile.ticker, "name": profile.name, "sector": profile.sector, "industry": profile.industry},
+        company=company,
         financials_by_year={y.fiscal_year: {"income": y.income, "balance": y.balance, "cash_flow": y.cash_flow} for y in year_objs},
         ratios_by_year=ratios,
         data_mode=provider.name,
+    )
+    return build_report(inputs)
+
+
+class ReportRequest(BaseModel):
+    """Everything here is optional: pass whatever the caller already
+    computed via /dcf, /dcf/scenarios, /comparables, and/or /ai/ask so the
+    report reflects the same numbers shown elsewhere in the app, instead of
+    the engine silently recomputing (or worse, never including) them."""
+
+    dcf_result: dict | None = None
+    dcf_assumptions: dict | None = None
+    comparables: dict | None = None
+    scenarios: dict | None = None
+    ai_narrative: dict | None = None
+
+
+@app.post("/api/companies/{ticker}/report")
+def generate_full_report(ticker: str, req: ReportRequest):
+    year_objs, ratios, company = _company_and_ratios(ticker, 5)
+
+    inputs = ReportInputs(
+        company=company,
+        financials_by_year={y.fiscal_year: {"income": y.income, "balance": y.balance, "cash_flow": y.cash_flow} for y in year_objs},
+        ratios_by_year=ratios,
+        dcf_result=req.dcf_result,
+        dcf_assumptions=req.dcf_assumptions,
+        comparables=req.comparables,
+        scenarios=req.scenarios,
+        data_mode=provider.name,
+        ai_narrative=req.ai_narrative,
     )
     return build_report(inputs)
 
